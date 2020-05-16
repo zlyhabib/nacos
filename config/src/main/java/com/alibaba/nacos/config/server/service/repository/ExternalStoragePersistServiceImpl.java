@@ -38,9 +38,10 @@ import com.alibaba.nacos.config.server.model.Page;
 import com.alibaba.nacos.config.server.model.SameConfigPolicy;
 import com.alibaba.nacos.config.server.model.SubInfo;
 import com.alibaba.nacos.config.server.model.TenantInfo;
-import com.alibaba.nacos.config.server.service.ConfigDataChangeEvent;
-import com.alibaba.nacos.config.server.service.DataSourceService;
-import com.alibaba.nacos.config.server.service.DynamicDataSource;
+import com.alibaba.nacos.config.server.model.event.ConfigDataChangeEvent;
+import com.alibaba.nacos.config.server.service.datasource.DataSourceService;
+import com.alibaba.nacos.config.server.service.datasource.DynamicDataSource;
+import com.alibaba.nacos.config.server.service.trace.ConfigTraceService;
 import com.alibaba.nacos.config.server.utils.LogUtil;
 import com.alibaba.nacos.config.server.utils.ParamUtils;
 import com.alibaba.nacos.config.server.utils.event.EventDispatcher;
@@ -48,7 +49,6 @@ import com.google.common.base.Joiner;
 import com.google.common.collect.Lists;
 import org.apache.commons.collections.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -81,21 +81,21 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_ADVANCE_INFO_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_ALL_INFO_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO4BETA_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO4TAG_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_AGGR_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_BASE_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_BETA_WRAPPER_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_CHANGED_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_TAG_WRAPPER_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_INFO_WRAPPER_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.CONFIG_KEY_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.HISTORY_DETAIL_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.HISTORY_LIST_ROW_MAPPER;
-import static com.alibaba.nacos.config.server.service.RowMapperManager.TENANT_INFO_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_ADVANCE_INFO_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_ALL_INFO_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO4BETA_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO4TAG_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_AGGR_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_BASE_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_BETA_WRAPPER_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_CHANGED_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_TAG_WRAPPER_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_INFO_WRAPPER_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.CONFIG_KEY_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.HISTORY_DETAIL_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.HISTORY_LIST_ROW_MAPPER;
+import static com.alibaba.nacos.config.server.service.repository.RowMapperManager.TENANT_INFO_ROW_MAPPER;
 
 /**
  * @author <a href="mailto:liaochuntao@live.com">liaochuntao</a>
@@ -289,7 +289,7 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 	/**
 	 * 更新配置信息
 	 */
-	public void updateConfigInfo4Beta(ConfigInfo configInfo, String srcIp, String srcUser, Timestamp time,
+	public void updateConfigInfo4Beta(ConfigInfo configInfo, String betaIps, String srcIp, String srcUser, Timestamp time,
 			boolean notify) {
 		String appNameTmp = StringUtils.isBlank(configInfo.getAppName()) ? StringUtils.EMPTY : configInfo.getAppName();
 		String tenantTmp = StringUtils.isBlank(configInfo.getTenant()) ? StringUtils.EMPTY : configInfo.getTenant();
@@ -342,8 +342,11 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 		try {
 			addConfigInfo4Beta(configInfo, betaIps, srcIp, null, time, notify);
 		} catch (DataIntegrityViolationException ive) { // 唯一性约束冲突
-			updateConfigInfo4Beta(configInfo, srcIp, null, time, notify);
+			updateConfigInfo4Beta(configInfo, betaIps, srcIp, null, time, notify);
 		}
+		EventDispatcher.fireEvent(
+				new ConfigDataChangeEvent(true, configInfo.getDataId(), configInfo.getGroup(), configInfo.getTenant(),
+						time.getTime()));
 	}
 
 	public void insertOrUpdateTag(final ConfigInfo configInfo, final String tag, final String srcIp,
@@ -353,6 +356,9 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 		} catch (DataIntegrityViolationException ive) { // 唯一性约束冲突
 			updateConfigInfo4Tag(configInfo, tag, srcIp, null, time, notify);
 		}
+		EventDispatcher.fireEvent(
+				new ConfigDataChangeEvent(false, configInfo.getDataId(), configInfo.getGroup(), configInfo.getTenant(), tag,
+						time.getTime()));
 	}
 
 	/**
@@ -385,6 +391,9 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 		} catch (DataIntegrityViolationException ive) { // 唯一性约束冲突
 			updateConfigInfo(configInfo, srcIp, srcUser, time, configAdvanceInfo, notify);
 		}
+		EventDispatcher.fireEvent(
+				new ConfigDataChangeEvent(false, configInfo.getDataId(), configInfo.getGroup(), configInfo.getTenant(),
+						time.getTime()));
 	}
 
 	/**
@@ -422,6 +431,9 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 				return Boolean.TRUE;
 			}
 		});
+
+		EventDispatcher.fireEvent(
+				new ConfigDataChangeEvent(false, dataId, group, tenant, System.currentTimeMillis()));
 	}
 
 	/**
@@ -436,7 +448,7 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 			return null;
 		}
 		ids.removeAll(Collections.singleton(null));
-		return tjt.execute(new TransactionCallback<List<ConfigInfo>>() {
+		List<ConfigInfo> result = tjt.execute(new TransactionCallback<List<ConfigInfo>>() {
 			final Timestamp time = new Timestamp(System.currentTimeMillis());
 
 			@Override
@@ -458,6 +470,22 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 				}
 			}
 		});
+
+		if (!CollectionUtils.isEmpty(result)) {
+			long currentTime = System.currentTimeMillis();
+			for (ConfigInfo configInfo : result) {
+				ConfigTraceService.logPersistenceEvent(configInfo.getDataId(),
+						configInfo.getGroup(), configInfo.getTenant(), null,
+						currentTime, srcIp,
+						ConfigTraceService.PERSISTENCE_EVENT_REMOVE, null);
+				EventDispatcher.fireEvent(
+						new ConfigDataChangeEvent(false, configInfo.getDataId(),
+								configInfo.getGroup(), configInfo.getTenant(),
+								currentTime));
+			}
+		}
+
+		return result;
 	}
 
 	/**
@@ -481,6 +509,9 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 				return Boolean.TRUE;
 			}
 		});
+
+		EventDispatcher.fireEvent(new ConfigDataChangeEvent(true, dataId, group, tenant,
+				System.currentTimeMillis()));
 	}
 
 	// ----------------------- config_aggr_info 表 insert update delete
@@ -2462,6 +2493,9 @@ public class ExternalStoragePersistServiceImpl implements PersistService {
 			LogUtil.fatalLog.error("[db-error] " + e.toString(), e);
 			throw e;
 		}
+		EventDispatcher.fireEvent(
+				new ConfigDataChangeEvent(false, dataId, group, tenant, tag,
+						System.currentTimeMillis()));
 	}
 
 	/**

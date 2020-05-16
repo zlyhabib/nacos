@@ -17,17 +17,20 @@
 package com.alibaba.nacos.config.server.service.repository;
 
 import com.alibaba.nacos.common.JustForTest;
+import com.alibaba.nacos.common.executor.ExecutorFactory;
+import com.alibaba.nacos.common.executor.NameThreadFactory;
+import com.alibaba.nacos.common.utils.JsonUtils;
 import com.alibaba.nacos.common.utils.LoggerUtils;
 import com.alibaba.nacos.common.utils.MD5Utils;
-import com.alibaba.nacos.common.utils.Observable;
-import com.alibaba.nacos.common.utils.Observer;
 import com.alibaba.nacos.config.server.configuration.ConditionDistributedEmbedStorage;
 import com.alibaba.nacos.config.server.constant.Constants;
 import com.alibaba.nacos.config.server.exception.NJdbcException;
+import com.alibaba.nacos.config.server.model.event.ConfigDumpEvent;
 import com.alibaba.nacos.config.server.model.event.RaftDBErrorEvent;
-import com.alibaba.nacos.config.server.service.DynamicDataSource;
-import com.alibaba.nacos.config.server.service.LocalDataSourceServiceImpl;
-import com.alibaba.nacos.config.server.service.RowMapperManager;
+import com.alibaba.nacos.config.server.service.datasource.DynamicDataSource;
+import com.alibaba.nacos.config.server.service.datasource.LocalDataSourceServiceImpl;
+import com.alibaba.nacos.config.server.service.dump.DumpConfigHandler;
+import com.alibaba.nacos.config.server.service.sql.EmbeddedStorageContextUtils;
 import com.alibaba.nacos.config.server.service.sql.ModifyRequest;
 import com.alibaba.nacos.config.server.service.sql.QueryType;
 import com.alibaba.nacos.config.server.service.sql.SelectRequest;
@@ -44,16 +47,14 @@ import com.alibaba.nacos.consistency.exception.ConsistencyException;
 import com.alibaba.nacos.consistency.snapshot.SnapshotOperation;
 import com.alibaba.nacos.core.cluster.ServerMemberManager;
 import com.alibaba.nacos.core.distributed.ProtocolManager;
-import com.alibaba.nacos.core.distributed.id.SnakeFlowerIdGenerator;
 import com.alibaba.nacos.core.notify.Event;
 import com.alibaba.nacos.core.notify.NotifyCenter;
 import com.alibaba.nacos.core.notify.listener.Subscribe;
-import com.alibaba.nacos.core.utils.ApplicationUtils;
 import com.alibaba.nacos.core.utils.ClassUtils;
+import com.alibaba.nacos.core.utils.GenericType;
 import com.google.common.base.Preconditions;
 import com.google.protobuf.ByteString;
 import org.apache.commons.lang3.StringUtils;
-import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Conditional;
 import org.springframework.dao.DataAccessException;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -64,12 +65,15 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import javax.annotation.PostConstruct;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.concurrent.Executor;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Consumer;
 
 /**
  * <pre>
@@ -140,6 +144,10 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	private ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
 	private ReentrantReadWriteLock.ReadLock readLock = lock.readLock();
 	private ReentrantReadWriteLock.WriteLock writeLock = lock.writeLock();
+	private final Executor executor = ExecutorFactory.newFixExecutorService(
+			DistributedDatabaseOperateImpl.class.getCanonicalName(),
+			1,
+			new NameThreadFactory("nacos.config.embedded.dump"));
 
 	public DistributedDatabaseOperateImpl(ServerMemberManager memberManager,
 			ProtocolManager protocolManager) throws Exception {
@@ -153,8 +161,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 
 	protected void init() throws Exception {
 
-		this.dataSourceService = (LocalDataSourceServiceImpl) DynamicDataSource.getInstance()
-				.getDataSource();
+		this.dataSourceService = (LocalDataSourceServiceImpl) DynamicDataSource
+				.getInstance().getDataSource();
 
 		// Because in Raft + Derby mode, ensuring data consistency depends on the Raft's
 		// log playback and snapshot recovery capabilities, and the last data must be cleared
@@ -178,6 +186,10 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 			}
 		});
 
+		NotifyCenter.registerToPublisher(ConfigDumpEvent.class,
+				NotifyCenter.RING_BUFFER_SIZE);
+		NotifyCenter.registerSubscribe(new DumpConfigHandler());
+
 		LogUtil.defaultLog.info("use DistributedTransactionServicesImpl");
 	}
 
@@ -189,7 +201,9 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public <R> R queryOne(String sql, Class<R> cls) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryOne info : sql : {}", sql);
+			LoggerUtils
+					.printIfDebugEnabled(LogUtil.defaultLog, "queryOne info : sql : {}",
+							sql);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_ONE_NO_MAPPER_NO_ARGS).sql(sql)
@@ -205,7 +219,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -213,7 +228,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public <R> R queryOne(String sql, Object[] args, Class<R> cls) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryOne info : sql : {}, args : {}", sql, args);
+			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+					"queryOne info : sql : {}, args : {}", sql, args);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_ONE_NO_MAPPER_WITH_ARGS).sql(sql)
@@ -229,7 +245,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -237,7 +254,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public <R> R queryOne(String sql, Object[] args, RowMapper<R> mapper) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryOne info : sql : {}, args : {}", sql, args);
+			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+					"queryOne info : sql : {}, args : {}", sql, args);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_ONE_WITH_MAPPER_WITH_ARGS).sql(sql)
@@ -254,7 +272,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -262,7 +281,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public <R> List<R> queryMany(String sql, Object[] args, RowMapper<R> mapper) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryMany info : sql : {}, args : {}", sql, args);
+			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+					"queryMany info : sql : {}, args : {}", sql, args);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_MANY_WITH_MAPPER_WITH_ARGS).sql(sql)
@@ -279,7 +299,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -287,7 +308,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public <R> List<R> queryMany(String sql, Object[] args, Class<R> rClass) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryMany info : sql : {}, args : {}", sql, args);
+			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+					"queryMany info : sql : {}, args : {}", sql, args);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_MANY_NO_MAPPER_WITH_ARGS).sql(sql)
@@ -303,7 +325,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -311,7 +334,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 	@Override
 	public List<Map<String, Object>> queryMany(String sql, Object[] args) {
 		try {
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "queryMany info : sql : {}, args : {}", sql, args);
+			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+					"queryMany info : sql : {}, args : {}", sql, args);
 
 			byte[] data = serializer.serialize(SelectRequest.builder()
 					.queryType(QueryType.QUERY_MANY_WITH_LIST_WITH_ARGS).sql(sql)
@@ -328,7 +352,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		}
 		catch (Exception e) {
 			LogUtil.fatalLog
-					.error("An exception occurred during the query operation : {}", e.toString());
+					.error("An exception occurred during the query operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -341,15 +366,19 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 			// array elements are not lost, the serialization here is done using the java-specific
 			// serialization framework, rather than continuing with the protobuff
 
-			LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "modifyRequests info : {}", sqlContext);
+			LoggerUtils
+					.printIfDebugEnabled(LogUtil.defaultLog, "modifyRequests info : {}",
+							sqlContext);
 
 			// {timestamp}-{group}-{ip:port}-{signature}
 
 			final String key =
-					System.currentTimeMillis() + "-" + group() + "-" + memberManager.getSelf().getAddress() + "-"
-							+ MD5Utils.md5Hex(sqlContext.toString(), Constants.ENCODE);
+					System.currentTimeMillis() + "-" + group() + "-" + memberManager
+							.getSelf().getAddress() + "-" + MD5Utils
+							.md5Hex(sqlContext.toString(), Constants.ENCODE);
 			Log log = Log.newBuilder().setGroup(group()).setKey(key)
 					.setData(ByteString.copyFrom(serializer.serialize(sqlContext)))
+					.putAllExtendInfo(EmbeddedStorageContextUtils.getCurrentExtendInfo())
 					.setType(sqlContext.getClass().getCanonicalName()).build();
 			LogFuture future = this.protocol.submit(log);
 			if (future.isOk()) {
@@ -362,7 +391,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 				throw (ConsistencyException) e;
 			}
 			LogUtil.fatalLog
-					.error("An exception occurred during the update operation : {}", e.toString());
+					.error("An exception occurred during the update operation : {}",
+							e.toString());
 			throw new NJdbcException(e);
 		}
 	}
@@ -378,7 +408,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		final SelectRequest selectRequest = serializer
 				.deserialize(request.getData().toByteArray(), SelectRequest.class);
 
-		LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "getData info : selectRequest : {}", selectRequest);
+		LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog,
+				"getData info : selectRequest : {}", selectRequest);
 
 		final RowMapper<Object> mapper = RowMapperManager
 				.getRowMapper(selectRequest.getClassName());
@@ -433,7 +464,8 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 
 	@Override
 	public LogFuture onApply(Log log) {
-		LoggerUtils.printIfDebugEnabled(LogUtil.defaultLog, "onApply info : log : {}", log);
+		LoggerUtils
+				.printIfDebugEnabled(LogUtil.defaultLog, "onApply info : log : {}", log);
 
 		final ByteString byteString = log.getData();
 		Preconditions.checkArgument(byteString != null, "Log.getData() must not null");
@@ -448,6 +480,12 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 				}
 			});
 			boolean isOk = onUpdate(sqlContext);
+
+			// If there is additional information, post processing
+			// Put into the asynchronous thread pool for processing to avoid blocking the
+			// normal execution of the state machine
+			executor.execute(() -> handleExtendInfo(log.getExtendInfoMap()));
+
 			return LogFuture.success(isOk);
 
 			// We do not believe that an error caused by a problem with an SQL error
@@ -488,27 +526,53 @@ public class DistributedDatabaseOperateImpl extends LogProcessor4CP
 		return update(transactionTemplate, jdbcTemplate, sqlContext);
 	}
 
-    public <R> R onQueryOne(String sql, Class<R> rClass) {
+	public <R> R onQueryOne(String sql, Class<R> rClass) {
 		return queryOne(jdbcTemplate, sql, rClass);
 	}
 
-    public <R> R onQueryOne(String sql, Object[] args, Class<R> rClass) {
+	public <R> R onQueryOne(String sql, Object[] args, Class<R> rClass) {
 		return queryOne(jdbcTemplate, sql, args, rClass);
 	}
 
-    public <R> R onQueryOne(String sql, Object[] args, RowMapper<R> mapper) {
+	public <R> R onQueryOne(String sql, Object[] args, RowMapper<R> mapper) {
 		return queryOne(jdbcTemplate, sql, args, mapper);
 	}
 
-    public <R> List<R> onQueryMany(String sql, Object[] args, RowMapper<R> mapper) {
+	public <R> List<R> onQueryMany(String sql, Object[] args, RowMapper<R> mapper) {
 		return queryMany(jdbcTemplate, sql, args, mapper);
 	}
 
-    public <R> List<R> onQueryMany(String sql, Object[] args, Class<R> rClass) {
+	public <R> List<R> onQueryMany(String sql, Object[] args, Class<R> rClass) {
 		return queryMany(jdbcTemplate, sql, args, rClass);
 	}
 
-    public List<Map<String, Object>> onQueryMany(String sql, Object[] args) {
+	public List<Map<String, Object>> onQueryMany(String sql, Object[] args) {
 		return queryMany(jdbcTemplate, sql, args);
+	}
+
+	private void handleExtendInfo(Map<String, String> extendInfo) {
+		if (extendInfo.containsKey(Constants.EXTEND_INFO_CONFIG_DUMP_EVENT)) {
+			String jsonVal = extendInfo.get(Constants.EXTEND_INFO_CONFIG_DUMP_EVENT);
+			if (StringUtils.isNotBlank(jsonVal)) {
+				Optional.ofNullable(
+						JsonUtils.toObjMaybeNull(jsonVal, ConfigDumpEvent.class))
+						.ifPresent(NotifyCenter::publishEvent);
+			}
+		}
+		if (extendInfo.containsKey(Constants.EXTEND_INFOS_CONFIG_DUMP_EVENT)) {
+			String jsonVal = extendInfo.get(Constants.EXTEND_INFO_CONFIG_DUMP_EVENT);
+			if (StringUtils.isNotBlank(jsonVal)) {
+				Optional.ofNullable(JsonUtils.toObjMaybeNull(jsonVal,
+						new GenericType<List<ConfigDumpEvent>>() {
+						}.getType())).ifPresent(new Consumer<Object>() {
+					@Override
+					public void accept(Object o) {
+						List<ConfigDumpEvent> list = (List<ConfigDumpEvent>) o;
+						list.stream().filter(Objects::nonNull)
+								.forEach(NotifyCenter::publishEvent);
+					}
+				});
+			}
+		}
 	}
 }

@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 import com.alibaba.nacos.config.server.service.sql.ModifyRequest;
-import com.alibaba.nacos.config.server.service.sql.SqlContextUtils;
+import com.alibaba.nacos.config.server.service.sql.EmbeddedStorageContextUtils;
 import org.springframework.jdbc.core.RowMapper;
 
 /**
@@ -107,9 +107,9 @@ public interface DatabaseOperate {
      */
     default Boolean smartUpdate() {
         try {
-            return update(SqlContextUtils.getCurrentSqlContext());
+            return update(EmbeddedStorageContextUtils.getCurrentSqlContext());
         } finally {
-            SqlContextUtils.cleanCurrentSqlContext();
+            EmbeddedStorageContextUtils.cleanAllContext();
         }
     }
 

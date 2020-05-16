@@ -17,8 +17,8 @@
 package com.alibaba.nacos.config.server.service.repository;
 
 import com.alibaba.nacos.config.server.configuration.ConditionStandaloneEmbedStorage;
-import com.alibaba.nacos.config.server.service.DataSourceService;
-import com.alibaba.nacos.config.server.service.DynamicDataSource;
+import com.alibaba.nacos.config.server.service.datasource.DataSourceService;
+import com.alibaba.nacos.config.server.service.datasource.DynamicDataSource;
 import com.alibaba.nacos.config.server.service.sql.ModifyRequest;
 import com.alibaba.nacos.config.server.utils.LogUtil;
 import org.springframework.context.annotation.Conditional;

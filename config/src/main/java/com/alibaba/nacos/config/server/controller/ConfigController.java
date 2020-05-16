@@ -32,7 +32,7 @@ import com.alibaba.nacos.config.server.model.SampleResult;
 import com.alibaba.nacos.config.server.result.ResultBuilder;
 import com.alibaba.nacos.config.server.result.code.ResultCodeEnum;
 import com.alibaba.nacos.config.server.service.AggrWhitelist;
-import com.alibaba.nacos.config.server.service.ConfigDataChangeEvent;
+import com.alibaba.nacos.config.server.model.event.ConfigDataChangeEvent;
 import com.alibaba.nacos.config.server.service.ConfigSubService;
 import com.alibaba.nacos.config.server.service.repository.PersistService;
 import com.alibaba.nacos.config.server.service.trace.ConfigTraceService;
@@ -171,28 +171,21 @@ public class ConfigController {
 		final Timestamp time = TimeUtils.getCurrentTime();
 		String betaIps = request.getHeader("betaIps");
 		ConfigInfo configInfo = new ConfigInfo(dataId, group, tenant, appName, content);
+		configInfo.setType(type);
 		if (StringUtils.isBlank(betaIps)) {
 			if (StringUtils.isBlank(tag)) {
 				persistService.insertOrUpdate(srcIp, srcUser, configInfo, time,
-						configAdvanceInfo, false);
-				EventDispatcher.fireEvent(
-						new ConfigDataChangeEvent(false, dataId, group, tenant,
-								time.getTime()));
+						configAdvanceInfo, true);
 			}
 			else {
 				persistService
-						.insertOrUpdateTag(configInfo, tag, srcIp, srcUser, time, false);
-				EventDispatcher.fireEvent(
-						new ConfigDataChangeEvent(false, dataId, group, tenant, tag,
-								time.getTime()));
+						.insertOrUpdateTag(configInfo, tag, srcIp, srcUser, time, true);
 			}
 		}
-		else { // beta publish
+		else {
+			// beta publish
 			persistService
-					.insertOrUpdateBeta(configInfo, betaIps, srcIp, srcUser, time, false);
-			EventDispatcher.fireEvent(
-					new ConfigDataChangeEvent(true, dataId, group, tenant,
-							time.getTime()));
+					.insertOrUpdateBeta(configInfo, betaIps, srcIp, srcUser, time, true);
 		}
 		ConfigTraceService
 				.logPersistenceEvent(dataId, group, tenant, requestIpApp, time.getTime(),
@@ -275,9 +268,6 @@ public class ConfigController {
 		ConfigTraceService
 				.logPersistenceEvent(dataId, group, tenant, null, time.getTime(),
 						clientIp, ConfigTraceService.PERSISTENCE_EVENT_REMOVE, null);
-		EventDispatcher.fireEvent(
-				new ConfigDataChangeEvent(false, dataId, group, tenant, tag,
-						time.getTime()));
 		return true;
 	}
 
@@ -303,10 +293,6 @@ public class ConfigController {
 						configInfo.getGroup(), configInfo.getTenant(), null,
 						time.getTime(), clientIp,
 						ConfigTraceService.PERSISTENCE_EVENT_REMOVE, null);
-				EventDispatcher.fireEvent(
-						new ConfigDataChangeEvent(false, configInfo.getDataId(),
-								configInfo.getGroup(), configInfo.getTenant(),
-								time.getTime()));
 			}
 		}
 		return ResultBuilder.buildSuccessResult(true);
@@ -453,8 +439,6 @@ public class ConfigController {
 			rr.setMessage("remove beta data error");
 			return rr;
 		}
-		EventDispatcher.fireEvent(new ConfigDataChangeEvent(true, dataId, group, tenant,
-				System.currentTimeMillis()));
 		rr.setCode(200);
 		rr.setData(true);
 		rr.setMessage("stop beta ok");
