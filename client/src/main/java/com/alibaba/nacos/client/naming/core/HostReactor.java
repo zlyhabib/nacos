@@ -19,6 +19,7 @@ import com.alibaba.fastjson.JSON;
 import com.alibaba.nacos.api.exception.NacosException;
 import com.alibaba.nacos.api.naming.pojo.Instance;
 import com.alibaba.nacos.api.naming.pojo.ServiceInfo;
+import com.alibaba.nacos.api.naming.utils.NamingUtils;
 import com.alibaba.nacos.client.monitor.MetricsMonitor;
 import com.alibaba.nacos.client.naming.backups.FailoverReactor;
 import com.alibaba.nacos.client.naming.cache.DiskCache;
@@ -99,6 +100,8 @@ public class HostReactor {
 
     public ServiceInfo processServiceJSON(String json) {
         ServiceInfo serviceInfo = JSON.parseObject(json, ServiceInfo.class);
+        serviceInfo.setGroupName(NamingUtils.getGroupName(serviceInfo.getName()));
+
         ServiceInfo oldService = serviceInfoMap.get(serviceInfo.getKey());
         if (serviceInfo.getHosts() == null || !serviceInfo.validate()) {
             //empty or error push, just ignore
